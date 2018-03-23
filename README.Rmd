@@ -1,0 +1,14 @@
+# Sentiment Report
+
+The first file to read is `driver.R` followed by `sentiment.Rmd`. This code 
+
+- starts a databricks cluster
+- extracts data
+- munges it
+- writes a CSV to S3
+
+the `Rmd` files are readable. The link to the rendered HTML will be live soon.
+
+Cheers
+Saptarshi
+joy@mozilla.com
