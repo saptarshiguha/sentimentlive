@@ -1,0 +1,16 @@
+
+These are the raw data points. Each row corresponds to the response of one
+profile on a given day. They are located at ``r RAWCSV``.
+
+```{r getFilesonS3, cache=TRUE}
+cat(paste(system(sprintf("aws s3 ls --recursive %s",RAWCSV),intern=TRUE),collapse="\n"))
+```
+
+
+These data sets are rolled up to a day  (and other covariates). They are located
+at ``r ROLLEDCSV``
+
+```{r getFilesonS32, cache=TRUE}
+cat(paste(system(sprintf("aws s3 ls --recursive  %s",ROLLEDCSV),intern=TRUE),collapse="\n"))
+```
+

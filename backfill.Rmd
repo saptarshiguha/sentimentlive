@@ -1,0 +1,110 @@
+
+```{pydbx LoadData, eval=runBackFillQ, cache=TRUE,class.source='code-show'}
+import sys 
+import datetime
+import random
+import subprocess
+import pyspark
+from pyspark.sql import SparkSession
+from datetime import datetime,timedelta
+
+spark = SparkSession.builder.getOrCreate()
+ts = spark.read.option("mergeSchema", "true").\
+     parquet("s3://net-mozaws-prod-us-west-2-pipeline-data/telemetry-shield-study-addon-parquet/v1/")
+ts.createOrReplaceTempView('ts')
+```
+
+
+This backfill was run from 2017-10-17 for two week periods (it backfills from
+then till two days from today). These files are stored in a holding file on S3
+and then the R code is called below which calls the R library code (see the
+Library section) to simplify these CSV files and keep them on S3.
+
+
+
+```{pydbx  BackFill, dependson='LoadData',eval=runBackFillQ,class.source = "code-show",autoSave=FALSE, cache=TRUE}
+pastlength = (__REPLACE__PASTLENGTH)
+HOLDING = "(__REPLACE__HOLDING)"
+```
+
+```{pydbx doBack,dependson='BackFill',eval=runBackFillQ,cache=TRUE}
+doChunk('2017-10-25','2017-11-07',pastlength,HOLDING)
+```
+
+```{pydbx doBack1,dependson='BackFill',eval=runBackFillQ,cache=TRUE}
+doChunk('2017-11-08','2017-11-21',pastlength,HOLDING)
+```
+
+```{pydbx doBack3,dependson='BackFill',eval=runBackFillQ,cache=TRUE}
+doChunk('2017-11-22','2017-12-05',pastlength,HOLDING)
+```
+
+```{pydbx doBack4,dependson='BackFill',eval=runBackFillQ,cache=TRUE}
+doChunk('2017-12-06','2017-12-19',pastlength,HOLDING) 
+```
+
+```{pydbx doBack5,dependson='BackFill',eval=runBackFillQ,cache=TRUE} 
+doChunk('2017-12-20','2018-01-02',pastlength,HOLDING)
+``` 
+
+```{pydbx doBack6,dependson='BackFill',eval=runBackFillQ,cache=TRUE} 
+doChunk('2018-01-03','2018-01-16',pastlength,HOLDING)
+``` 
+
+```{pydbx doBack7,dependson='BackFill',eval=runBackFillQ,cache=TRUE} 
+doChunk('2018-01-17','2018-01-30',pastlength,HOLDING) 
+```
+
+```{pydbx doBack8,dependson='BackFill',eval=runBackFillQ,cache=TRUE} 
+doChunk('2018-01-31','2018-02-13',pastlength,HOLDING) 
+``` 
+
+```{pydbx doBack9,dependson='BackFill',eval=runBackFillQ,cache=TRUE} 
+doChunk('2018-02-14','2018-02-27',pastlength,HOLDING) 
+```
+
+```{pydbx doBack2,dependson='BackFill',eval=runBackFillQ,cache=TRUE} 
+doChunk('2018-02-28','2018-03-13',pastlength,HOLDING) 
+```
+
+
+
+
+
+This requires AWS CLI tools installed.
+
+
+```{r BackFillR, eval=runBackFillQ,class.source = "code-show"}
+library(data.table)
+library(rjson)
+
+locons3 <- HOLDING
+files = system(sprintf("aws s3 ls %s",locons3),inter=TRUE)
+files <- lapply(strsplit(files," +"),function(s){sprintf("%s%s",locons3,s[3])})
+tempfolder <- tempdir()
+if(interactive()){
+    library(progress)
+    pb <- progress_bar$new(total = length(files),format='[:bar] :percent eta: :eta')
+    pb$tick(0)
+}
+
+allrolled <- rbindlist(Map(function(i,floc){
+    y <- convertPyCSVTo1( floc, tempfolder,RAWCSV, ROLLEDCSV)
+    if(exists("pb")) pb$tick()
+    y
+},seq_along(files),files))
+
+newname <- sprintf("%saggregated_%s_%s.csv", ROLLEDCSV,strftime(min(allrolled$dateAsked),"%Y%m%d"),
+                   strftime(max(allrolled$dateAsked),"%Y%m%d"))
+tempfilename <- tempfile()
+write.csv(allrolled, tempfilename)
+system(sprintf("aws s3 cp %s %s", tempfilename, newname))
+system(sprintf("aws s3 rm --recursive %s",HOLDING))
+
+p <- list(mindate = strftime(min(allrolled$dateAsked),"%Y-%m-%d"),
+          maxdate = strftime(max(allrolled$dateAsked),"%Y-%m-%d"))
+
+writeLines(toJSON(p),"/tmp/data.json")
+system(sprintf("aws s3 cp /tmp/data.json %s/",ROOTPATH))
+```
+

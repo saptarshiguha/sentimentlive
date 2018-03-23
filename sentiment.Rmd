@@ -1,0 +1,88 @@
+---
+title: Sentiment Report
+author: Saptarshi Guha <joy@mozilla.com>
+date: "`r format(Sys.time(), '%B %d, %Y')`"
+output:
+ html_document:
+    mathjax: default
+    self_contained: false
+    theme: readable
+    highlight: haddock
+    number_sections: false
+    code_folding: show
+    toc: false
+    toc_depth: 3
+---
+
+
+```{r child = '/home/sguha/mz/template2.Rmd'}
+```
+
+
+
+
+An example of literate coding for a production report. 
+
+
+# Configuration
+
+Always run
+
+```{r child='./options.Rmd'}
+```
+
+
+## Library Functions
+
+Load all library functions. For obvious reasons, needs to be run before others.
+
+
+```{r child = './library.Rmd'}
+```
+
+
+
+## Regular Cron Job
+
+This file is  rendered every day (or on some regular basis)
+
+```{r child = './cron.Rmd'}
+```
+
+
+## Back Fill 
+
+One time. Currently I have run it from 2017-11-01 till 2018-03-14.
+
+```{r child = './backfill.Rmd'}
+```
+
+
+# About {-}
+
+For nearly four plus years, we are at mozilla have been looking for a way to
+gauge the user sentiment towards Firefox. With Shield and Unified Telemetry,
+we are almost there. The document below is inspired by the ideas of "literate
+coding" : code and elaboration in the same document. With RMarkdown and the
+appropriate libraries this can be run from the R console to produce this web
+page.
+
+We ask 1% of our users, every day, two questions
+
+- Would you recommend Firefox to a friend or family member?
+- Will you keep using Firefox in the future?
+
+which are growth and retention questions. We also plan to include some other
+questions too. These two questions are shown to everyone in the 1% sample(it's opt out) and
+though we have some response bias , it is not much. Background work can be found  at
+
+- https://metrics.mozilla.com/protected/sguha/sentiment/56/index.html
+- https://metrics.mozilla.com/protected/sguha/sentiment/57/index.html
+- https://metrics.mozilla.com/protected/sguha/sentiment/58/index.html
+
+A background to this document can be found [here](https://docs.google.com/document/d/1cgKWaU__4b96w0ZjuX9W9G4lq6VWbgHXkD33BO3XA4k/edit)
+# Files on S3
+
+```{r child = './files.Rmd'}
+```
+

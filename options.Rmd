@@ -1,0 +1,37 @@
+Set options  and make sure that `render` will clear caches and rerun when date
+changes
+
+
+```{r params, cache=TRUE,eval=TRUE,echo=TRUE,class.source='code-show'}
+BUCKET        <- 'mozilla-databricks-telemetry-test' ## mozilla-metrics
+DBFOLDER      <- sprintf("s3://%s/sguha/sentiment_live",BUCKET) 
+## the above for ATMO would be sprintf("%s/user/sguha/sentiment_live",ROOTBUCKET) 
+ROOTPATH      <- DBFOLDER
+HOLDING       <- sprintf("%s/holding/",ROOTPATH)
+RAWCSV        <- sprintf("%s/rawcsv/", ROOTPATH)
+ROLLEDCSV     <- sprintf("%s/rolledcsv/",ROOTPATH)
+PASTLENGTH    <- 13
+ 
+options(databricks = list( 
+            instance  = "dbc-caf9527b-e073",
+            clusterId = '0301-215745-hatch1',
+            log       = list(bucket='mozilla-databricks-telemetry-test',
+                             prefix='user/sguha/databricks/logs'),
+            user      = "sguha@mozilla.com",
+            token     = Sys.getenv("sentimentToken"),
+            password  = Sys.getenv("databricksPWD")))
+knitr::opts_chunk$set(
+                      warning=FALSE, message=FALSE
+                      ,poll=TRUE,stopOnError=TRUE
+                  )
+```
+
+Start the cluster. 
+
+```{r dbxStart,dependson='params', cache=TRUE,eval=TRUE,class.source='code-show'}
+ dbctx() 
+ .Last <- function(){
+     dbxCtxDestroy(NULL)
+     dbxDelete(getOption("databricks")$clusterId)
+}
+```

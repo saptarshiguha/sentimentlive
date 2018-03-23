@@ -1,0 +1,82 @@
+
+The regular cron job looks just like the backfill job. Except no need for
+multiple runs! The other change is we need to know what dates we need to run
+this for.
+
+
+```{r GetDates, cache=TRUE, class.source='code-show'}
+system(sprintf("aws s3 cp %s/data.json /tmp",ROOTPATH))
+p <- fromJSON(file="/tmp/data.json")
+DATE1 <- strftime(as.Date(p$maxdate)+1,"%Y-%m-%d")
+DATE2 <- strftime(Sys.Date()-1,"%Y-%m-%d")
+if(DATE2<=DATE1){
+    shallwerun <-FALSE
+}else{
+    shallwerun <- TRUE
+}
+```
+
+Load the shield data sets
+
+```{pydbx LoadData, eval=runCron && shallwerun, cache=TRUE,class.source='code-show'}
+import sys 
+import datetime
+import random
+import subprocess
+import pyspark
+from pyspark.sql import SparkSession
+from datetime import datetime,timedelta
+
+spark = SparkSession.builder.getOrCreate()
+ts = spark.read.option("mergeSchema", "true").\
+     parquet("s3://net-mozaws-prod-us-west-2-pipeline-data/telemetry-shield-study-addon-parquet/v1/")
+ts.createOrReplaceTempView('ts')
+```
+
+Run the job for the dates in question
+
+```{pydbx Runit,dependson='GetDates',eval=runCron && shallwerun,cache=TRUE,autosave=FALSE,class='code-show'}
+pastlength = (__REPLACE__PASTLENGTH)
+HOLDING = "(__REPLACE__HOLDING)"
+doChunk('(__REPLACE__DATE1)','(__REPLACE__DATE2)',pastlength,HOLDING)
+```
+
+And convert to CSV files
+
+
+```{r LastStep, eval=FALSE & runCron && shallwerun,class.source = "code-show"}
+library(data.table)
+library(rjson)
+locons3 <- HOLDING
+files <- sprintf("%ssentiment_%s_%s.csv/",HOLDING,strftime(as.Date(DATE1),"%Y%m%d"),strftime(as.Date(DATE2),"%Y%m%d"))
+tempfolder <- tempdir()
+allrolled <- convertPyCSVTo1( files,tempfolder,RAWCSV, ROLLEDCSV)
+
+## Download Existing Data
+tempfilename2 <- tempfile()
+system(sprintf("aws s3 cp %s %s", p$latestCSV, tempfilename2))
+old <- fread(tempfilename2)[, V1:=NULL]
+combined <- rbind(old, allrolled)
+
+
+## Combine with new data
+tempfilename <- tempfile()
+write.csv(combined, tempfilename)
+newname <- sprintf("%saggregated_%s_%s.csv", ROLLEDCSV,strftime(min(combined$dateAsked),"%Y%m%d"),
+                   strftime(max(combined$dateAsked),"%Y%m%d"))
+system(sprintf("aws s3 cp %s %s", tempfilename, newname))
+
+## Delete HOLDING
+system(sprintf("aws s3 rm --recursive %s",HOLDING))
+
+## Upload meta info
+p <- list(mindate = strftime(min(combined$dateAsked),"%Y-%m-%d"),
+          maxdate = strftime(max(combined$dateAsked),"%Y-%m-%d"),
+          latestCSV=newname
+          )
+writeLines(toJSON(p),"/tmp/data.json")
+system(sprintf("aws s3 cp /tmp/data.json %s/",ROOTPATH))
+
+slacks$log(p,channel="@sguha")
+```
+

@@ -1,0 +1,352 @@
+The following function creates a reference to the shield parquet data set,
+extracts relevant fields related to the sentiment study.
+
+
+```{r X, class.source = 'code-hide', cache=TRUE}
+4
+```
+
+```{pydbx functions1, dependson='X',cache=TRUE,class.source = "code-show"}
+
+def get_data_from_sheild(start_date,end_date):
+  """Extract Question data from Sentiment Study
+The following code extracts the questions and responses from the 
+shield parquet data set.
+  """
+  d=spark.sql("""
+SELECT 
+client_id,
+substr(application.version,1,2)                as version,
+submission                                     as date,
+payload.branch                                 as branch,
+coalesce(payload.data.attributes.message,'NA') as question,
+payload.data.attributes.event                  as event,
+coalesce(payload.data.attributes.score,-2)     as response
+from ts
+WHERE payload.testing                = FALSE
+  AND payload.study_name             = '57-perception-shield-study'
+  AND submission  >= '{start_date}'
+  and submission <= '{end_date}'
+and substr(application.version,1,2) >= '56'
+order by client_id
+""".format(start_date = start_date.strftime('%Y%m%d'),end_date = end_date.strftime("%Y%m%d")))
+  return d
+  
+```
+
+The next function then converts this into a data frame that is one row per
+profile, labeled as responder or non responder depending on whether their
+response was given or not. 
+
+```{pydbx convertToOneRow, dependson='X',cache=TRUE,class.source = "code-show"}
+
+def convert_shield_one_row(fromtable,pastlength):
+  """Convert the Shield Responses into 1 row per client
+
+The following code converts the response data into one one row per client with 
+a field as answered or not depending on whether profile answered the question
+
+  """
+  fromtable.createOrReplaceTempView("d")
+  d3 = spark.sql("""
+with
+answered AS (
+  select 
+        client_id,
+        date, 
+        version, 
+        branch,
+        question, 
+        response, 
+        'r' as responder 
+  from d
+  where event = 'answered'
+), 
+a1 as (
+  select 
+        d.client_id 
+  from d 
+  except select client_id from answered
+),
+nonaswered as (
+  select 
+        d.client_id, 
+        date, 
+        version,
+        branch, 
+        response,
+        question,
+        'nr' as responder 
+from a1 left join  d 
+on a1.client_id  = d.client_id
+)
+select * from answered UNION ALL select * from nonaswered
+""".format(fromtable=fromtable)) #d
+  d3 = d3.dropDuplicates(["client_id","version"])
+  d3.createOrReplaceTempView("d3")
+  d4 = spark.sql("""
+select
+client_id,
+date as dateAsked,
+date_format(date_add(from_unixtime(unix_timestamp(date,'yyyyMMdd'),'yyyy-MM-dd'),-{pastlength}),'yyyyMMdd') as past,
+version,
+branch,
+question,
+responder,
+response
+from  d3
+""".format(pastlength=pastlength))
+  return d4
+```
+
+
+UDF to determine if user has an adblocker. See https://sql.telemetry.mozilla.org/queries/50794#table
+
+
+```{pydbx adbcode,cache=TRUE,dependson='X',class.source='code-show'}
+def isAddBlocker(a):
+    if a is None:
+        return False
+    if len(a)==0:
+        return False
+    ids = [p.addon_id for p in a]
+    sids = filter(lambda x : x in ('{d10d0bf8-f5b5-c8b4-a8b2-2b9879e08c5d}','uBlock0@raymondhill.net','jid1-NIfFY2CA8fy1tg@jetpack','adblockultimate@adblockultimate.net','jid1-MnnxcxisBPnSXQ@jetpack'), ids)
+    if len(sids)>0 :
+        hasadblocker=True
+    else:
+        hasadblocker=False
+    return hasadblocker
+
+
+import pyspark
+sqlContext.registerFunction("hasAdBlocker", isAddBlocker,pyspark.sql.types.BooleanType())
+globals()["hasAdBlocker"] = pyspark.sql.functions.udf(isAddBlocker, pyspark.sql.types.BooleanType())
+```
+
+
+
+
+This function gets the last `past` days history of a profile form `main_summary`. Number of days of history is a parameter to
+`convert_shield_one_row`.
+
+
+```{pydbx fromMS, eval=TRUE, dependson=c('adbcode','X'),cache=TRUE,class.source = "code-show"}
+
+def get_from_ms(msstart,end_date,shieldtable):
+  
+  """Extract historic data from main_summary
+We want only the pastlength number of days per profile before they were asked the question
+See `past` from the query above
+  """
+  shieldtable.createOrReplaceTempView("d3")
+  result1 = spark.sql("""
+select 
+main_summary.client_id as cid,
+case when submission_date_s3 between past and dateAsked then submission_date_s3  else NULL end as date,
+substr(app_version,1,2) as version,
+dateAsked as dateAsked,
+first(profile_creation_date) as pcd,
+last(branch) as branch,
+last(question) as question,
+last(responder) as responder,
+last(response) as response,
+case when  first(memory_mb) < 1800 then '0.(0,1800)' 
+     when  first(memory_mb) <= 2048 then '1.[1800,2048]' 
+     when  first(memory_mb) <= 4096 then '2.(2049,4096)' 
+    else '3.(4096,)' 
+end as memory,
+coalesce(first(country),'NA') as country,
+case when first(attribution.source) is NULL then "missing" else first(attribution.source) end as attr,
+case when first(attribution.source) is NULL then 0  else 1 end as hasAttribution,
+case when first(sync_configured) is NULL then 0 else 1 end as hasSync,
+hasAdBlocker(last(active_addons)) as hasAdblocker,
+sum( coalesce(sync_count_desktop +  sync_count_mobile,0)) as syncdevices,
+sum(coalesce(scalar_parent_browser_engagement_total_uri_count,0)) as turi,
+sum(subsession_length/3600.0) as th,
+sum(active_ticks*5/3600.0) as ah
+from main_summary join d3
+on d3.client_id = main_summary.client_id
+where submission_date_s3 >= '{msstart}' and submission_date_s3<= '{end_date}'
+and app_name = 'Firefox'
+and normalized_channel = 'release'
+and substr(app_version,1,2)>='56'
+group by 1,2,3,4
+having date is not null
+""".format(msstart=msstart.strftime("%Y%m%d"), end_date=end_date.strftime("%Y%m%d")))
+  return result1
+```
+
+spark.sql("select active_addons from main_summary where sample_id='42' and submission_date_s3='20180101' limit 10").collect()
+```
+And now we have to do two things
+
+- summarize continuous variables to one value
+- take the latest value of a factor variable
+
+
+```{pydbx simplifyMS, eval=TRUE, dependson='X',cache=TRUE,class.source = "code-show"}
+
+def simplify_from_ms(result1):
+  """ Simplify main_summary extraction
+We collapse the summary of a profile into one row per client, version they were on and date asked
+For continouous variables, we sum and for categoricals (which could change) we take the most recent
+  """
+  result1.createOrReplaceTempView("result1")
+  result2=spark.sql("""
+select
+cid,
+dateAsked,
+version,
+datediff( from_unixtime(unix_timestamp(dateAsked,'yyyyMMdd'),'yyyy-MM-dd'),
+          date_add("1970-01-01",max(pcd))
+) as ageWhenAsked,
+sum(syncdevices) as syncdevices,
+sum(ah)  as ah,
+sum(th)  as th,
+sum(turi) as turi
+from result1
+group by 1,2,3
+having th>=0 and ageWhenAsked>=0
+""")
+  result3 = spark.sql("""
+with a as (select 
+cid,
+dateAsked,
+version,
+memory,
+case when country in ("US", "DE", "BR", "RU", "FR", "PL", "ID", "IN", "GB",  "IT", "ES", "CA", "JP", "VN", "MX") then country else "other" end as country,
+version,
+attr,
+hasAttribution,
+hasSync,
+  hasAdblocker,
+branch,
+question,
+responder,
+response,
+row_number() over (partition by cid,dateAsked,version order by date desc ) as rn 
+from result1)
+select * from a where rn=1 
+""")
+  return result2,result3
+```
+
+And lastly, merge those two tables
+
+```{pydbx  mergeMS, eval=TRUE, dependson='X',cache=TRUE,class.source = "code-show"}
+
+def merge_ms(result2,result3):
+  result2.createOrReplaceTempView("result2")
+  result3.createOrReplaceTempView("result3") 
+  result4 = spark.sql("""
+select 
+result2.cid,
+result2.dateAsked,
+result2.version,
+branch,
+question,
+responder,
+response,
+ageWhenAsked,
+case when ageWhenAsked <0 then -1 
+     when ageWhenAsked <= 6 then 0 
+     when ageWhenAsked <= 13 then 1
+     when ageWhenAsked < 42 then 2 else 3  end as maturityOfProfile,
+result3.memory,
+country,
+attr as attributionValue,
+hasAttribution,
+  hasSync,hasAdblocker,
+syncdevices,
+ah,
+th,
+turi
+from result2 join result3
+on result2.cid = result3.cid
+and result2.version=result3.version
+and result2.dateAsked = result3.dateAsked
+""")
+  return result4
+```
+
+`start_date`, `end_date` are the temporal ranges to query data from Shield experiment
+`pastlength` is used to see how many days in the past we need to go to (e.g. 14 days past)
+from the day the were asked the question. Note, `SAVEWHERE` ends in a `/`.
+
+See the file `backfill.Rmd` for an example.
+
+```{pydbx ,dependson='X',cache=TRUE, class.source='code-show'}
+def doChunk(start_date,end_date, pastlength,SAVEWHERE):
+  from datetime import datetime
+  _time1 = datetime.now()
+  start_date = datetime.strptime(start_date,'%Y-%m-%d')
+  end_date = datetime.strptime(end_date,'%Y-%m-%d')
+  main_summary_start = start_date - timedelta(days=pastlength)
+  t1 = get_data_from_sheild(start_date,end_date)
+  t2 = convert_shield_one_row(t1,pastlength)
+  result1 = get_from_ms(main_summary_start,end_date,t2)
+  result2,result3 = simplify_from_ms(result1)
+  result4= merge_ms(result2,result3)
+  loc = "{}sentiment_{}_{}.csv".format(SAVEWHERE,
+                                        start_date.strftime("%Y%m%d"),
+                                        end_date.strftime("%Y%m%d"))
+  result4.write.csv(loc, mode='overwrite')
+  _time2 = datetime.now()
+  log.info("Wrote {} which took {} minutes\n".format(loc, (_time2-_time1).seconds/60.0))
+
+```
+The next bit of code is in R and does
+
+- converts the format of the date the question was asked
+- creates URI usage buckets (based on the usage of the entire 1%)
+- creates Active Hour usage buckets 
+- creates labels for profile recency(i.e. if the profile is less than 7 days,between 7 and 14 days  etc)  
+- also create smaller data sets which are rolled up to less granular dimensions
+
+All files are then stored on S3.
+
+```{r lastStep, eval=TRUE, dependson='X',class.source = "code-show"}
+
+convertPyCSVTo1 <- function(floc,tempfolder,dest,dest2){
+    require(data.table)
+    ## Converts the many  CSV componentns into one
+    ## and creates some usage buckets
+    ## Also rolls up to remove client level
+    system(sprintf("rm -rf %s/*",tempfolder))
+    system(sprintf("aws s3 sync %s %s/  >/dev/null 2>&1", floc,tempfolder))
+    y <- fread(sprintf("cat %s/part*csv",tempfolder))
+    setnames(y,c("cid","dateAsked","version","branch",'question',
+                 'responder','response','ageWhenAsked','maturity',
+                 'memory','country','attrvalue','attrq','syncq','addblockq','syncdevices','activehrs','totalhrs','turi'))
+    y[, dateAsked:=strftime(as.Date(as.character(dateAsked),"%Y%m%d"),"%Y-%m-%d")]
+    y[, addblockq:=1*(addblockq=='true')]
+    y[, turiBucket:=factor(findInterval(turi,c(0,quantile(turi,c(0.1,0.9)),Inf)),
+                           labels=c("Lowest 10%","Middle 80%","Top 10%"))]
+    y[, activeHrBucket:=factor(findInterval(activehrs,c(0,quantile(activehrs,c(0.1,0.9)),Inf)),
+                               labels=c("Lowest 10%","Middle 80%","Top 10%"))]
+    y[, maturity:=factor(maturity, labels=c("1. <=7 days","2. (7,14] days", "3. (2,6] weeks","4. (6,...) weeks"))]
+    y <- y[branch %in% c("recommend-1","keep-using-1"),]
+    y2 <- y[, data.table(
+        totalPop=.N,
+        totalResponder = sum(responder=='r'),
+        totalNonResponder = sum(responder=='nr'),
+        totalAgeWhenAsked  = sum(ageWhenAsked),
+        totalNo = sum(!is.na(response)  & response==-1),
+        totalMaybe = sum(!is.na(response)  & response==0),
+        totalYes = sum(!is.na(response)  & response==1),
+        totalSyncDevices=sum(syncdevices),
+        totalActiveHours=sum(activehrs),
+        totalHours=sum(totalhrs),
+        totalUri=sum(turi)
+    ),by=list(dateAsked, version, branch,country,maturity,memory,hasAttribution=attrq,haSync=syncq, hasAdBlocker=addblockq,
+              turiBucket, activeHrBucket)]
+    f<-sprintf("%s/sentiment_raw_%s_%s.csv",tempfolder,min(y$dateAsked),max(y$dateAsked))
+    #f2<-sprintf("%s/sentiment_rolled_%s_%s.csv",tempfolder,min(y$dateAsked),max(y$dateAsked))
+    write.csv(y,f)
+    #write.csv(y2,f2)
+    system(sprintf("aws s3 cp %s %s",f,dest))
+    #system(sprintf("aws s3 cp %s %s",f2,dest2))
+    y2
+}
+```
+
